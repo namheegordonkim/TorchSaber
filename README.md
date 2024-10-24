@@ -7,3 +7,13 @@ conda create -y -n torchsaber python=3.10
 conda activate torchsaber
 pip install -e .
 ```
+
+## Run Interactive Visualizer
+```bash
+python scripts/enjoy_boxrr.py
+```
+
+## Run Headlessly
+```bash
+python scripts/simulate_boxrr.py
+```
