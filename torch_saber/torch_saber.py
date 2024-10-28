@@ -11,7 +11,7 @@ from torch_saber.utils.pose_utils import unity_to_zup, quat_rotate, expm_to_quat
 class TorchSaber:
 
     @staticmethod
-    def evaluate(my_3p_traj: torch.Tensor, note_bags: torch.Tensor, batch_size: int = None):
+    def evaluate(my_3p_traj: torch.Tensor, note_bags: torch.Tensor, obstacle_bags: torch.Tensor, batch_size: int = None):
         """
         Given a batch of 3p trajecotries (normalized to match PHC's height) and the sequence of note bags,
         Evaluate the f1 score of the trajectory, assuming the dimensions of the hitboxes.
@@ -26,7 +26,7 @@ class TorchSaber:
         batch_idxs = torch.split(idxs, batch_size if batch_size is not None else my_3p_traj.shape[1])
         batch_reses = []
         for batch_i in batch_idxs:
-            res = TorchSaber.get_collision_masks(my_3p_traj[:, batch_i], note_bags[:, batch_i])
+            res = TorchSaber.get_collision_masks(my_3p_traj[:, batch_i], note_bags[:, batch_i], obstacle_bags[:, batch_i])
             batch_reses.append(res)
         (
             collide_yes_across_time,
@@ -34,6 +34,7 @@ class TorchSaber:
             direction_yes_across_time,
             good_yes_across_time,
             opportunity_yes,
+            three_p_obstacle_collision_yes,
         ) = list(reduce(lambda acc, res: [torch.cat([a, r], dim=1) for a, r in zip(acc, res)], batch_reses))
 
         n_opportunities = torch.sum(opportunity_yes, dim=(1, 2))
@@ -42,8 +43,9 @@ class TorchSaber:
         n_goods = torch.sum(good_yes_across_time, dim=(1, 2, 3))
         f1 = (2 * n_goods) / (2 * n_goods + (n_hits - n_goods) + n_misses)
         f1[f1.isnan()] = 0
+        n_obstacle_hits = three_p_obstacle_collision_yes.sum((1, 2, 3))
 
-        return f1, n_hits, n_misses, n_goods
+        return f1, n_hits, n_misses, n_goods, n_obstacle_hits
 
     @staticmethod
     def get_note_verts_and_normals_and_quats(note_bags: torch.Tensor):

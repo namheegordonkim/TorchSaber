@@ -1,7 +1,7 @@
 from argparse import ArgumentParser
 from torch_saber import TorchSaber
 from torch_saber.utils.bsmg_xror_utils import get_xbo_np, extract_3p_with_60fps, open_bsmg_or_boxrr
-from torch_saber.utils.data_utils import SegmentSampler
+from torch_saber.utils.data_utils import SegmentSampler, nanpad
 from torch_saber.xror.xror import XROR
 import numpy as np
 import torch
@@ -22,9 +22,9 @@ def main(args, remaining_args):
     length = timestamps.shape[0]
     my_3p_traj = my_3p_traj.reshape((-1, 3, 6))
     my_3p_traj = torch.as_tensor(my_3p_traj, dtype=torch.float, device=device)
-    note_bags = torch.as_tensor(note_bags, dtype=torch.float, device=device)
-    bomb_bags = torch.as_tensor(bomb_bags, dtype=torch.float, device=device)
-    obstacle_bags = torch.as_tensor(obstacle_bags, dtype=torch.float, device=device)
+    note_bags = nanpad(torch.as_tensor(note_bags, dtype=torch.float, device=device), 20, 0)
+    bomb_bags = nanpad(torch.as_tensor(bomb_bags, dtype=torch.float, device=device), 20, 0)
+    obstacle_bags = nanpad(torch.as_tensor(obstacle_bags, dtype=torch.float, device=device), 20, 0)
     timestamps = torch.as_tensor(timestamps, dtype=torch.float, device=device)
     lengths = torch.tensor([length], dtype=torch.long, device=device)
 
@@ -40,10 +40,11 @@ def main(args, remaining_args):
         1,
     )
 
-    f1, n_hits, n_misses, n_goods = TorchSaber.evaluate(movement_segments.three_p, game_segments.notes, args.batch_size)
+    f1, n_hits, n_misses, n_goods, n_obs_hits = TorchSaber.evaluate(movement_segments.three_p, game_segments.notes, game_segments.obstacles, args.batch_size)
     for i in range(f1.shape[0]):
         print(f"Evaluation for input BOXRR {i}")
         print(f"{f1[i]=:.2f}, {n_hits[i]=}, {n_misses[i]=}, {n_goods[i]=}")
+        print(f"{n_obs_hits[i]=}")
 
 
 if __name__ == "__main__":
