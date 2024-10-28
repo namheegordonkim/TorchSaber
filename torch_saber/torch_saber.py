@@ -151,32 +151,35 @@ class TorchSaber:
         # right vertices
         obstacle_verts[..., [2, 3, 5, 6], 1] += (obstacle_bags[..., [-2]] - 1) * np.clip(plane_width_interval, a_min=0, a_max=np.inf)
 
+        obstacle_verts[obstacle_verts.isnan().any(-1)] = torch.nan
+
         obstacle_face_normals = obstacle_collider_mesh.face_normals
         obstacle_face_normals = obstacle_face_normals[None, None, None].repeat(obstacle_bags.shape[0], 0).repeat(obstacle_bags.shape[1], 1).repeat(20, 2)
         obstacle_face_normals = torch.tensor(obstacle_face_normals, dtype=torch.float, device="cuda")
+        obstacle_face_normals[obstacle_verts.isnan().any(-1).any(-1)] = torch.nan
 
         return obstacle_verts, obstacle_face_normals
 
     @staticmethod
     def box_box_collision_from_verts_and_normals(verts1: torch.Tensor, normals1: torch.Tensor, verts2: torch.Tensor, normals2: torch.Tensor):
         edge_idxs = pv.Cube().regular_faces.reshape(-1, 2)
-        saber_collider_edges_across_time = verts1[..., edge_idxs[:, 0], :] - verts1[..., edge_idxs[:, 1], :]
-        note_collider_edges_across_time = verts2[..., edge_idxs[:, 0], :] - verts2[..., edge_idxs[:, 1], :]
-        edge_cross_prods_across_time = (
+        edges1 = verts1[..., edge_idxs[:, 0], :] - verts1[..., edge_idxs[:, 1], :]
+        edges2 = verts2[..., edge_idxs[:, 0], :] - verts2[..., edge_idxs[:, 1], :]
+        edge_crosses = (
             torch.cross(
-                saber_collider_edges_across_time[:, :, :, :, None, None],
-                note_collider_edges_across_time[:, :, None, None],
+                edges1[:, :, :, :, None, None],
+                edges2[:, :, None, None],
                 dim=-1,
             )
             .permute((0, 1, 2, 4, 3, 5, 6))
             .contiguous()
         )
-        edge_cross_prods_across_time = edge_cross_prods_across_time.view(
+        edge_crosses = edge_crosses.view(
             (
-                edge_cross_prods_across_time.shape[0],
-                edge_cross_prods_across_time.shape[1],
-                edge_cross_prods_across_time.shape[2],
-                edge_cross_prods_across_time.shape[3],
+                edge_crosses.shape[0],
+                edge_crosses.shape[1],
+                edge_crosses.shape[2],
+                edge_crosses.shape[3],
                 -1,
                 3,
             )
@@ -184,51 +187,45 @@ class TorchSaber:
         # The end-all-be-all for collision precompute
         all_cand_axes_across_time = torch.concatenate(
             [
-                edge_cross_prods_across_time,
-                normals1[:, :, :, None].repeat_interleave(edge_cross_prods_across_time.shape[3], 3),
-                normals2[:, :, None].repeat_interleave(edge_cross_prods_across_time.shape[2], 2),
+                edge_crosses,
+                normals1[:, :, :, None].repeat_interleave(edge_crosses.shape[3], 3),
+                normals2[:, :, None].repeat_interleave(edge_crosses.shape[2], 2),
             ],
             dim=-2,
         )
-        all_cand_axes_across_time /= torch.norm(all_cand_axes_across_time, dim=-1, keepdim=True)
+        all_cand_axes_across_time /= (torch.norm(all_cand_axes_across_time, dim=-1, keepdim=True) + 1e-10)
 
-        saber_projected_across_time = torch.sum(
+        proj1 = torch.sum(
             verts1[:, :, :, None, None] * all_cand_axes_across_time[:, :, :, :, :, None],
             dim=-1,
         )
-        note_projected_across_time = torch.sum(
+        proj2 = torch.sum(
             verts2[:, :, None, :, None] * all_cand_axes_across_time[:, :, :, :, :, None],
             dim=-1,
         )
-        saber_min = saber_projected_across_time.min(-1)[0]
-        saber_max = saber_projected_across_time.max(-1)[0]
-        note_min = note_projected_across_time.min(-1)[0]
-        note_max = note_projected_across_time.max(-1)[0]
-        collide_yes_across_time = torch.all(saber_max > note_min, dim=-1) & torch.all(note_max > saber_min, dim=-1)
-        return collide_yes_across_time
+        min1 = proj1.min(-1)[0]
+        max1 = proj1.max(-1)[0]
+        min2 = proj2.min(-1)[0]
+        max2 = proj2.max(-1)[0]
+        collide_yes = torch.all(max1 >= min2, dim=-1) & torch.all(max2 >= min1, dim=-1)
+        return collide_yes
 
     @staticmethod
-    def get_collision_masks(my_3p_traj: torch.Tensor, note_bags: torch.Tensor):
-        (
-            saber_collider_verts_across_time,
-            saber_collider_normals_across_time,
-            saber_quat,
-        ) = TorchSaber.get_saber_verts_and_normals_and_quats(my_3p_traj)
-
-        (
-            note_collider_verts_across_time,
-            note_collider_normals_across_time,
-            note_quat,
-        ) = TorchSaber.get_note_verts_and_normals_and_quats(note_bags)
+    def get_collision_masks(my_3p_traj: torch.Tensor, note_bags: torch.Tensor, obstacle_bags: torch.Tensor):
+        saber_collider_verts_across_time, saber_collider_normals_across_time, saber_quat = TorchSaber.get_saber_verts_and_normals_and_quats(my_3p_traj)
+        note_collider_verts_across_time, note_collider_normals_across_time, note_quat = TorchSaber.get_note_verts_and_normals_and_quats(note_bags)
+        three_p_verts_across_time, three_p_normals_across_time = TorchSaber.get_3p_verts_and_normals(my_3p_traj)
+        obstacle_verts_across_time, obstacle_normals_across_time = TorchSaber.get_obstacle_verts_and_normals(obstacle_bags)
 
         tmp = note_bags.detach().cpu().numpy() * 1
         tmp = np.where(np.isnan(tmp), 0, tmp)
         tmp = tmp.astype(int)
 
-        collide_yes_across_time = TorchSaber.box_box_collision_from_verts_and_normals(saber_collider_verts_across_time, saber_collider_normals_across_time, note_collider_verts_across_time, note_collider_normals_across_time)
+        saber_box_collision_yeses = TorchSaber.box_box_collision_from_verts_and_normals(saber_collider_verts_across_time, saber_collider_normals_across_time, note_collider_verts_across_time, note_collider_normals_across_time)
+        three_p_obstacle_collision_yeses = TorchSaber.box_box_collision_from_verts_and_normals(three_p_verts_across_time, three_p_normals_across_time, obstacle_verts_across_time, obstacle_normals_across_time)
 
         color_onehots = torch.eye(2, dtype=torch.bool, device="cuda")[tmp[:, :, :, -3]].permute((0, 1, 3, 2))
-        color_yes_across_time = collide_yes_across_time & color_onehots
+        color_yes_across_time = saber_box_collision_yeses & color_onehots
 
         offsets = torch.tensor([[[[1, 0, 0]]]], dtype=torch.float, device="cuda").repeat_interleave(note_bags.shape[0], 0).repeat_interleave(note_bags.shape[1], 1).repeat_interleave(2, 2)
         offsets = quat_rotate(saber_quat.contiguous(), offsets)
@@ -240,16 +237,17 @@ class TorchSaber:
         cut_dir_vecs_across_time = quat_rotate(note_quat, cut_dir_vecs_across_time)
         dots_across_time = torch.sum(cut_dir_vecs_across_time[:, :, None] * offset_vels[:, :, :, None], dim=-1)
         direction_yes_across_time = dots_across_time > 0.2
-        good_yes_across_time = collide_yes_across_time & color_yes_across_time & direction_yes_across_time
+        good_yes_across_time = saber_box_collision_yeses & color_yes_across_time & direction_yes_across_time
         note_pos = note_collider_verts_across_time.mean(-2)
         opportunity_yes = note_pos[..., 0] < 1
 
         return (
-            collide_yes_across_time,
+            saber_box_collision_yeses,
             color_yes_across_time,
             direction_yes_across_time,
             good_yes_across_time,
             opportunity_yes,
+            three_p_obstacle_collision_yeses,
         )
 
     @staticmethod
@@ -301,7 +299,7 @@ class TorchSaber:
     def get_3p_verts_and_normals(my_3p_traj: torch.Tensor):
         collider_mesh = pv.Cube(x_length=0.1, y_length=0.1, z_length=0.1)
         collider_verts = collider_mesh.points
-        collider_verts_across_time = collider_verts[None, None, None].repeat(my_3p_traj.shape[0], 0).repeat(my_3p_traj.shape[1], 1).repeat(2, 2)
+        collider_verts_across_time = collider_verts[None, None, None].repeat(my_3p_traj.shape[0], 0).repeat(my_3p_traj.shape[1], 1).repeat(3, 2)
         collider_verts_across_time = torch.tensor(collider_verts_across_time, dtype=torch.float, device="cuda")
         my_3p_xyz, my_3p_expm = (
             my_3p_traj[..., :3] * 1,
@@ -311,7 +309,7 @@ class TorchSaber:
         my_3p_xyz, my_3p_quat = unity_to_zup(my_3p_xyz, my_3p_quat)
         collider_verts_across_time += my_3p_xyz[:, :, :, None]
         collider_normals = collider_mesh.face_normals
-        collider_normals_across_time = collider_normals[None, None, None].repeat(my_3p_traj.shape[0], 0).repeat(my_3p_traj.shape[1], 1).repeat(2, 2)
+        collider_normals_across_time = collider_normals[None, None, None].repeat(my_3p_traj.shape[0], 0).repeat(my_3p_traj.shape[1], 1).repeat(3, 2)
         collider_normals_across_time = torch.tensor(collider_normals_across_time, dtype=torch.float, device="cuda")
 
         return collider_verts_across_time, collider_normals_across_time

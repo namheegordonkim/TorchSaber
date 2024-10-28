@@ -1,13 +1,12 @@
 from argparse import ArgumentParser
 from functools import reduce
-
 from imgui_bundle import immapp
 from imgui_bundle._imgui_bundle import imgui, hello_imgui
 from pyvista_imgui import ImguiPlotter
 from scipy.spatial.transform import Rotation
 from torch_saber import TorchSaber
 from torch_saber.utils.bsmg_xror_utils import get_xbo_np, extract_3p_with_60fps, open_bsmg_or_boxrr
-from torch_saber.utils.data_utils import SegmentSampler, GameSegment, MovementSegment
+from torch_saber.utils.data_utils import SegmentSampler, nanpad
 from torch_saber.utils.pose_utils import expm_to_quat, unity_to_zup
 from torch_saber.viz.visual_data import ObstacleVisual, NoteVisual, GenericVisual
 from torch_saber.xror.xror import XROR
@@ -15,13 +14,13 @@ import numpy as np
 import pyvista as pv
 import torch
 
-
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 class AppState:
     def __init__(
         self,
+        three_p_visuals: np.ndarray,
         saber_visuals: np.ndarray,
         axes_visuals: np.ndarray,
         note_visuals: np.ndarray,
@@ -36,7 +35,10 @@ class AppState:
         good_yes_across_time: np.ndarray,
         notes: np.ndarray,
         three_p: np.ndarray,
+        three_p_xyz: np.ndarray,
+        three_p_obstacle_collision_yeses: np.ndarray,
     ):
+        self.three_p_visuals = three_p_visuals
         self.saber_visuals = saber_visuals
         self.axes_visuals = axes_visuals
         self.note_visuals = note_visuals
@@ -51,6 +53,8 @@ class AppState:
         self.good_yes_across_time = good_yes_across_time
         self.notes = notes
         self.three_p = three_p
+        self.three_p_xyz = three_p_xyz
+        self.three_p_obstacle_collision_yeses = three_p_obstacle_collision_yeses
 
         # GUI state parameters, in alphabetical order
         self.first_time = True
@@ -92,7 +96,7 @@ def setup_and_run_gui(pl: ImguiPlotter, app_state: AppState):
 
         changed, app_state.show_axes = imgui.checkbox("Show Axes", app_state.show_axes)
         changed, app_state.playing = imgui.checkbox("Playing", app_state.playing)
-        changed, app_state.frame = imgui.slider_int("Frame", app_state.frame, 0, app_state.note_xyzs.shape[1])
+        changed, app_state.frame = imgui.slider_int("Frame", app_state.frame, 0, app_state.three_p.shape[1] - 1)
 
         imgui.end()
 
@@ -110,7 +114,8 @@ def setup_and_run_gui(pl: ImguiPlotter, app_state: AppState):
             xyz = xyzexpm[:3]
             quat = expm_to_quat(xyzexpm[3:])
             xyz, quat = unity_to_zup(xyz, quat)
-            pos = xyz
+            # pos = xyz
+            pos = app_state.three_p_xyz[0, app_state.frame, i]
             rot = Rotation.from_quat(quat).as_matrix()
             m = np.eye(4)
             m[:3, 3] = pos
@@ -133,6 +138,20 @@ def setup_and_run_gui(pl: ImguiPlotter, app_state: AppState):
             else:
                 app_state.axes_visuals[i].actor.SetVisibility(False)
 
+            three_p_colors = {
+                0: np.array([1.0, 0.0, 0.0]),
+                1: np.array([0.0, 1.0, 0.0]),
+                2: np.array([0.0, 0.0, 1.0]),
+            }
+            if app_state.three_p_obstacle_collision_yeses[0, app_state.frame, i].any():
+                three_p_color = np.array([1.0, 0.0, 0.0])[None]
+            else:
+                three_p_color = three_p_colors[i][None]
+            app_state.three_p_visuals[i].mesh.cell_data["color"] = three_p_color.repeat(app_state.three_p_visuals[i].mesh.n_cells, 0) * 1
+
+            app_state.three_p_visuals[i].actor.user_matrix = m
+            app_state.three_p_visuals[i].actor.SetVisibility(True)
+
         # Note, bomb, and obstacle visualization
         for i in range(app_state.note_xyzs.shape[2]):
             m = np.eye(4)
@@ -152,6 +171,12 @@ def setup_and_run_gui(pl: ImguiPlotter, app_state: AppState):
             else:
                 app_state.note_visuals[i].bloq_actor.SetVisibility(False)
                 app_state.note_visuals[i].arrow_actor.SetVisibility(False)
+
+            if ~np.isnan(app_state.obstacle_verts[0, app_state.frame, i]).any():
+                app_state.obstacle_visuals[i].collider_mesh.points = app_state.obstacle_verts[0, app_state.frame, i]
+                app_state.obstacle_visuals[i].collider_actor.SetVisibility(True)
+            else:
+                app_state.obstacle_visuals[i].collider_actor.SetVisibility(False)
 
         # Render logic
         app_state.first_time = False
@@ -177,10 +202,12 @@ def main(args, remaining_args):
     n_note_visuals = 20
     n_bomb_visuals = 20
     n_obstacle_visuals = 20
+    n_3p_visuals = 3
 
     note_visuals = np.empty(n_note_visuals, dtype=object)
     bomb_visuals = np.empty(n_bomb_visuals, dtype=object)
     obstacle_visuals = np.empty(n_obstacle_visuals, dtype=object)
+    three_p_visuals = np.empty(n_3p_visuals, dtype=object)
 
     for i in range(n_note_visuals):
         note_visual = NoteVisual(pl)
@@ -215,20 +242,33 @@ def main(args, remaining_args):
             2: np.array([0.0, 0.0, 1.0]),
         }
         sphere_mesh = pv.Sphere(radius=0.05)
-        sphere_mesh.cell_data["color"] = np.array([sphere_colors[i]]).repeat(sphere_mesh.n_cells, 0) * 255
+        sphere_mesh.cell_data["color"] = np.array([sphere_colors[i]]).repeat(sphere_mesh.n_cells, 0)
         x_axis_mesh = pv.Arrow((0, 0, 0), (1, 0, 0), tip_radius=0.025, shaft_radius=0.01)
-        x_axis_mesh.cell_data["color"] = np.array([[1, 0, 0]]).repeat(x_axis_mesh.n_cells, 0) * 255
+        x_axis_mesh.cell_data["color"] = np.array([[1.0, 0.0, 0.0]]).repeat(x_axis_mesh.n_cells, 0)
         y_axis_mesh = pv.Arrow((0, 0, 0), (0, 1, 0), tip_radius=0.025, shaft_radius=0.01)
-        y_axis_mesh.cell_data["color"] = np.array([[0, 1, 0]]).repeat(y_axis_mesh.n_cells, 0) * 255
+        y_axis_mesh.cell_data["color"] = np.array([[0.0, 1.0, 0.0]]).repeat(y_axis_mesh.n_cells, 0)
         z_axis_mesh = pv.Arrow((0, 0, 0), (0, 0, 1), tip_radius=0.025, shaft_radius=0.01)
-        z_axis_mesh.cell_data["color"] = np.array([[0, 0, 1]]).repeat(z_axis_mesh.n_cells, 0) * 255
-        axes_mesh = x_axis_mesh + y_axis_mesh + z_axis_mesh
+        z_axis_mesh.cell_data["color"] = np.array([[0.0, 0.0, 1.0]]).repeat(z_axis_mesh.n_cells, 0)
+        axes_mesh = sphere_mesh + x_axis_mesh + y_axis_mesh + z_axis_mesh
         axes_actor = pl.add_mesh(axes_mesh, scalars="color", rgb=True)
 
         axes_visual = GenericVisual(axes_mesh, axes_actor)
         axes_visuals[i] = axes_visual
 
-    in_boxrr = "torch_saber/sample_data/74ec6271-61f8-4b50-a4be-21b4668fd1d8.xror"
+    for i in range(n_axes_visuals):
+        cube_colors = {
+            0: np.array([1.0, 0.0, 0.0]),
+            1: np.array([0.0, 1.0, 0.0]),
+            2: np.array([0.0, 0.0, 1.0]),
+        }
+        cube_mesh = pv.Cube(x_length=0.1, y_length=0.1, z_length=0.1)
+        cube_mesh.cell_data["color"] = np.array([cube_colors[i]]).repeat(cube_mesh.n_cells, 0)
+        three_p_mesh = cube_mesh
+        three_p_actor = pl.add_mesh(three_p_mesh, scalars="color", rgb=True)
+        three_p_visual = GenericVisual(three_p_mesh, three_p_actor)
+        three_p_visuals[i] = three_p_visual
+
+    in_boxrr = "torch_saber/sample_data/4233b6fe-1fa4-4c48-8259-2e202d902531.xror"
     beatmap, song_info = open_bsmg_or_boxrr(None, in_boxrr)
     with open(in_boxrr, "rb") as f:
         file = f.read()
@@ -240,9 +280,9 @@ def main(args, remaining_args):
     length = timestamps.shape[0]
     my_3p_traj = my_3p_traj.reshape((-1, 3, 6))
     my_3p_traj = torch.as_tensor(my_3p_traj, dtype=torch.float, device=device)
-    note_bags = torch.as_tensor(note_bags, dtype=torch.float, device=device)
-    bomb_bags = torch.as_tensor(bomb_bags, dtype=torch.float, device=device)
-    obstacle_bags = torch.as_tensor(obstacle_bags, dtype=torch.float, device=device)
+    note_bags = nanpad(torch.as_tensor(note_bags, dtype=torch.float, device=device), 20, 0)
+    bomb_bags = nanpad(torch.as_tensor(bomb_bags, dtype=torch.float, device=device), 20, 0)
+    obstacle_bags = nanpad(torch.as_tensor(obstacle_bags, dtype=torch.float, device=device), 20, 0)
     timestamps = torch.as_tensor(timestamps, dtype=torch.float, device=device)
     lengths = torch.tensor([length], dtype=torch.long, device=device)
 
@@ -261,7 +301,7 @@ def main(args, remaining_args):
     batch_idxs = torch.split(idxs, args.batch_size)
     batch_reses = []
     for batch_i in batch_idxs:
-        res = TorchSaber.get_collision_masks(movement_segments.three_p[:, batch_i], game_segments.notes[:, batch_i])
+        res = TorchSaber.get_collision_masks(movement_segments.three_p[:, batch_i], game_segments.notes[:, batch_i], game_segments.obstacles[:, batch_i])
         batch_reses.append(res)
     (
         collide_yes_across_time,
@@ -269,11 +309,12 @@ def main(args, remaining_args):
         direction_yes_across_time,
         good_yes_across_time,
         opportunity_yes,
+        three_p_obstacle_collision_yeses,
     ) = list(reduce(lambda acc, res: [torch.cat([a, r], dim=1) for a, r in zip(acc, res)], batch_reses))
     note_verts, note_face_normals, note_quat = TorchSaber.get_note_verts_and_normals_and_quats(game_segments.notes)
     bomb_verts, bomb_face_normals, bomb_quat = TorchSaber.get_note_verts_and_normals_and_quats(game_segments.bombs)
     obstacle_verts, obstacle_face_normals = TorchSaber.get_obstacle_verts_and_normals(game_segments.obstacles)
-
+    three_p_verts, three_p_face_normals = TorchSaber.get_3p_verts_and_normals(movement_segments.three_p)
     collide_yes_across_time = collide_yes_across_time.detach().cpu().numpy()
     good_yes_across_time = good_yes_across_time.detach().cpu().numpy()
 
@@ -289,9 +330,10 @@ def main(args, remaining_args):
 
     notes = game_segments.notes.detach().cpu().numpy()
     three_p = movement_segments.three_p.detach().cpu().numpy()
+    three_p_xyz = three_p_verts.detach().cpu().numpy().mean(-2)
 
     # Run the GUI
-    app_state = AppState(saber_visuals, axes_visuals, note_visuals, bomb_visuals, obstacle_visuals, note_xyzs, note_quat, bomb_xyzs, bomb_quat, obstacle_verts, collide_yes_across_time, good_yes_across_time, notes, three_p)
+    app_state = AppState(three_p_visuals, saber_visuals, axes_visuals, note_visuals, bomb_visuals, obstacle_visuals, note_xyzs, note_quat, bomb_xyzs, bomb_quat, obstacle_verts, collide_yes_across_time, good_yes_across_time, notes, three_p, three_p_xyz, three_p_obstacle_collision_yeses)
     setup_and_run_gui(pl, app_state)
 
 

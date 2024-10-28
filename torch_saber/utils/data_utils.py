@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 
@@ -140,3 +141,12 @@ def get_segment_its(lengths, n_samples, segment_length):
         dim=2,
     )
     return segment_its
+
+
+def nanpad(tensor: torch.Tensor, pad_until: int, dim: int = -1):
+    length_to_go = np.maximum(pad_until - tensor.shape[dim], 0)
+    good_shape = torch.Size(torch.maximum(torch.as_tensor(tensor.shape), torch.as_tensor(1)))
+    nanpad = torch.ones(good_shape, device=tensor.device) * torch.nan
+    nanpad = nanpad[[dim]].repeat_interleave(length_to_go, dim=dim)
+    padded_tensor = torch.cat([tensor, nanpad], dim=dim)
+    return padded_tensor

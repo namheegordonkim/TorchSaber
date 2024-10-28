@@ -10,7 +10,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 
 
 def main(args, remaining_args):
-    in_boxrr = "torch_saber/sample_data/74ec6271-61f8-4b50-a4be-21b4668fd1d8.xror"
+    in_boxrr = "torch_saber/sample_data/4233b6fe-1fa4-4c48-8259-2e202d902531.xror"
     beatmap, song_info = open_bsmg_or_boxrr(None, in_boxrr)
     with open(in_boxrr, "rb") as f:
         file = f.read()
