@@ -65,11 +65,11 @@ def quat_rotate(q, v):
 
 
 def unity_to_zup(xyz: np.ndarray, quat: np.ndarray):
-    my_pos = xyz
+    my_pos = xyz * 1
     my_pos[..., [0, 1, 2]] = my_pos[..., [2, 0, 1]]
     my_pos[..., 1] *= -1
 
-    my_quat = quat
+    my_quat = quat * 1
     my_quat[..., [0, 1, 2, 3]] = my_quat[..., [2, 0, 1, 3]]
     my_quat[..., [0, 2]] *= -1
 
