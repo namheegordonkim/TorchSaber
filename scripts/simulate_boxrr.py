@@ -40,7 +40,7 @@ def main(args, remaining_args):
         1,
     )
 
-    f1, n_hits, n_misses, n_goods = TorchSaber.evaluate(movement_segments.three_p, game_segments.notes)
+    f1, n_hits, n_misses, n_goods = TorchSaber.evaluate(movement_segments.three_p, game_segments.notes, args.batch_size)
     for i in range(f1.shape[0]):
         print(f"Evaluation for input BOXRR {i}")
         print(f"{f1[i]=:.2f}, {n_hits[i]=}, {n_misses[i]=}, {n_goods[i]=}")
@@ -48,5 +48,6 @@ def main(args, remaining_args):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
+    parser.add_argument("--batch_size", type=int, default=512)
     args, remaining_args = parser.parse_known_args()
     main(args, remaining_args)

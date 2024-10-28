@@ -1,3 +1,5 @@
+from functools import reduce
+
 import torch
 import numpy as np
 import pyvista as pv
@@ -9,7 +11,7 @@ from torch_saber.utils.pose_utils import unity_to_zup, quat_rotate, expm_to_quat
 class TorchSaber:
 
     @staticmethod
-    def evaluate(my_3p_traj: torch.Tensor, note_bags: torch.Tensor):
+    def evaluate(my_3p_traj: torch.Tensor, note_bags: torch.Tensor, batch_size: int = None):
         """
         Given a batch of 3p trajecotries (normalized to match PHC's height) and the sequence of note bags,
         Evaluate the f1 score of the trajectory, assuming the dimensions of the hitboxes.
@@ -20,13 +22,21 @@ class TorchSaber:
         note_bags has shape (B, T, 20, 5)
         where the 5-dim feature is time, x, y, color, angle
         """
+        idxs = torch.arange(my_3p_traj.shape[1], device="cuda")
+        batch_idxs = torch.split(idxs, batch_size if batch_size is not None else my_3p_traj.shape[1])
+        batch_reses = []
+        for batch_i in batch_idxs:
+            res = TorchSaber.get_collision_masks(my_3p_traj[:, batch_i], note_bags[:, batch_i])
+            batch_reses.append(res)
         (
             collide_yes_across_time,
             color_yes_across_time,
             direction_yes_across_time,
             good_yes_across_time,
             opportunity_yes,
-        ) = TorchSaber.get_collision_masks(my_3p_traj, note_bags)
+        ) = list(reduce(lambda acc, res: [torch.cat([a, r], dim=1) for a, r in zip(acc, res)], batch_reses))
+
+
         n_opportunities = torch.sum(opportunity_yes, dim=(1, 2))
         n_hits = torch.sum(torch.any(collide_yes_across_time, dim=2), dim=(1, 2))
         n_misses = n_opportunities - n_hits
@@ -173,13 +183,17 @@ class TorchSaber:
 
         note_collider_edges_across_time = note_collider_verts_across_time[..., edge_idxs[:, 0], :] - note_collider_verts_across_time[..., edge_idxs[:, 1], :]
 
-        edge_cross_prods_across_time = torch.cross(
-            saber_collider_edges_across_time[:, :, :, :, None, None],
-            note_collider_edges_across_time[:, :, None, None],
-            dim=-1,
-        ).permute((0, 1, 2, 4, 3, 5, 6))
+        edge_cross_prods_across_time = (
+            torch.cross(
+                saber_collider_edges_across_time[:, :, :, :, None, None],
+                note_collider_edges_across_time[:, :, None, None],
+                dim=-1,
+            )
+            .permute((0, 1, 2, 4, 3, 5, 6))
+            .contiguous()
+        )
 
-        edge_cross_prods_across_time = edge_cross_prods_across_time.reshape(
+        edge_cross_prods_across_time = edge_cross_prods_across_time.view(
             (
                 edge_cross_prods_across_time.shape[0],
                 edge_cross_prods_across_time.shape[1],

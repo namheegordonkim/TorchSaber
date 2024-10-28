@@ -1,4 +1,6 @@
 from argparse import ArgumentParser
+from functools import reduce
+
 from imgui_bundle import immapp
 from imgui_bundle._imgui_bundle import imgui, hello_imgui
 from pyvista_imgui import ImguiPlotter
@@ -255,13 +257,19 @@ def main(args, remaining_args):
         length,
         1,
     )
+    idxs = torch.arange(movement_segments.three_p.shape[1], device="cuda")
+    batch_idxs = torch.split(idxs, args.batch_size)
+    batch_reses = []
+    for batch_i in batch_idxs:
+        res = TorchSaber.get_collision_masks(movement_segments.three_p[:, batch_i], game_segments.notes[:, batch_i])
+        batch_reses.append(res)
     (
         collide_yes_across_time,
         color_yes_across_time,
         direction_yes_across_time,
         good_yes_across_time,
         opportunity_yes,
-    ) = TorchSaber.get_collision_masks(movement_segments.three_p, game_segments.notes)
+    ) = list(reduce(lambda acc, res: [torch.cat([a, r], dim=1) for a, r in zip(acc, res)], batch_reses))
     note_verts, note_face_normals, note_quat = TorchSaber.get_note_verts_and_normals_and_quats(game_segments.notes)
     bomb_verts, bomb_face_normals, bomb_quat = TorchSaber.get_note_verts_and_normals_and_quats(game_segments.bombs)
     obstacle_verts, obstacle_face_normals = TorchSaber.get_obstacle_verts_and_normals(game_segments.obstacles)
@@ -289,5 +297,6 @@ def main(args, remaining_args):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
+    parser.add_argument("--batch_size", type=int, default=512)
     args, remaining_args = parser.parse_known_args()
     main(args, remaining_args)
